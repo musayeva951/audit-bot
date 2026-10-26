@@ -274,8 +274,8 @@ def format_report(filename, findings):
 # ---------------------------------------------------------------- Telegram
 
 try:
-    from telegram import Update
-    from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
     HAS_TG = True
 except Exception:
     HAS_TG = False
@@ -296,7 +296,7 @@ if HAS_TG:
     async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _gate(update):
             return
-        await update.message.reply_text(
+        text = (
             "Salom! Men tekshiruv botiman.\n\n"
             "Foydalanish:\n"
             "• .py fayl tashla — kodni tekshirib, zaif joylarini ko'rsataman\n"
@@ -304,6 +304,59 @@ if HAS_TG:
             "• /ruxsatli — ruxsatli odamlar ro'yxati (faqat egasi)\n\n"
             "Eslatma: @ ning o'zi Telegramdan kod olib bermaydi. "
             "Shuning uchun @ topilmasa, fayl tashlashni so'rayman.")
+        if update.effective_user.id == OWNER_ID:
+            text += "\n\nEgasi sifatida /admin paneldan ham ruxsat berishing mumkin."
+        await update.message.reply_text(text)
+
+    def admin_keyboard():
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("Ruxsatli odamlar", callback_data="admin_list")],
+            [InlineKeyboardButton("Ruxsat berish", callback_data="admin_grant")],
+            [InlineKeyboardButton("Ruxsat olish", callback_data="admin_revoke")],
+        ])
+
+    async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if _gate(update) or update.effective_user.id != OWNER_ID:
+            return
+        await update.message.reply_text("Admin panel — ruxsat berish uchun:", reply_markup=admin_keyboard())
+
+    async def on_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        if _gate(update) or update.effective_user.id != OWNER_ID:
+            return
+        await query.answer()
+        data = query.data or ""
+        if data == "admin_list":
+            rows = list_allowed()
+            if not rows:
+                await query.edit_message_text("Ruxsatli odam yo'q.", reply_markup=admin_keyboard())
+                return
+            buttons = []
+            for uid, name in rows:
+                label = f"{uid} {name}".strip()
+                if uid != OWNER_ID:
+                    buttons.append([InlineKeyboardButton(f"O'chirish: {label}", callback_data=f"admin_remove:{uid}")])
+            buttons.append([InlineKeyboardButton("Orqaga", callback_data="admin_home")])
+            text = "Ruxsatli odamlar:\n" + "\n".join(f"• {uid} {name}".strip() for uid, name in rows)
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+        elif data == "admin_home":
+            await query.edit_message_text("Admin panel — ruxsat berish uchun:", reply_markup=admin_keyboard())
+        elif data == "admin_grant":
+            context.user_data["admin_pending"] = "grant"
+            await query.edit_message_text("Ruxsat bermoqchi bo'lgan odamning Telegram ID sini yubor (faqat raqam).")
+        elif data == "admin_revoke":
+            context.user_data["admin_pending"] = "revoke"
+            await query.edit_message_text("Ruxsatini olmoqchi bo'lgan odamning Telegram ID sini yubor (faqat raqam).")
+        elif data.startswith("admin_remove:"):
+            try:
+                uid = int(data.split(":", 1)[1])
+            except Exception:
+                return
+            if uid == OWNER_ID:
+                await query.edit_message_text("Egasaning ruxsatini olib bo'lmaydi.", reply_markup=admin_keyboard())
+                return
+            remove_allowed(uid)
+            await query.edit_message_text(f"{uid} ruxsatli ro'yxatdan o'chirildi.", reply_markup=admin_keyboard())
 
     async def cmd_ruxsatli(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if _gate(update) or update.effective_user.id != OWNER_ID:
@@ -357,6 +410,23 @@ if HAS_TG:
         if _gate(update):
             return
         text = (update.message.text or "").strip()
+        # Admin paneldan ID kutilayotgan bo'lsa, avval shuni bajar
+        pending = context.user_data.pop("admin_pending", None) if context.user_data else None
+        if pending and update.effective_user.id == OWNER_ID:
+            if not text.isdigit():
+                await update.message.reply_text("Faqat raqam yubor, ID raqam bo'lishi kerak.", reply_markup=admin_keyboard())
+                return
+            uid = int(text)
+            if pending == "grant":
+                add_allowed(uid)
+                await update.message.reply_text(f"{uid} ruxsatli ro'yxatga qo'shildi.", reply_markup=admin_keyboard())
+            else:
+                if uid == OWNER_ID:
+                    await update.message.reply_text("Egasaning ruxsatini olib bo'lmaydi.", reply_markup=admin_keyboard())
+                else:
+                    remove_allowed(uid)
+                    await update.message.reply_text(f"{uid} ruxsatli ro'yxatdan o'chirildi.", reply_markup=admin_keyboard())
+            return
         username = text[1:] if text.startswith("@") else None
         if text.startswith("/tekshir") and len(text.split()) > 1:
             username = text.split()[1].lstrip("@")
@@ -382,6 +452,8 @@ if HAS_TG:
             raise SystemExit("AUDIT_BOT_TOKEN env kerak")
         app = ApplicationBuilder().token(TOKEN).build()
         app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("admin", cmd_admin))
+        app.add_handler(CallbackQueryHandler(on_admin_callback))
         app.add_handler(CommandHandler("ruxsatli", cmd_ruxsatli))
         app.add_handler(CommandHandler("ruxsat", cmd_ruxsat))
         app.add_handler(CommandHandler("ruxsat_ol", cmd_ruxsat_ol))
